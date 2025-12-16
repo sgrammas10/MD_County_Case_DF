@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 
 df = pd.read_csv("DC_FD_ByCaseType.csv")
 
-# Extract numeric FY year
+# Extract numeric FY year (FY2025 -> 2025)
 df["FY_year"] = (
     df["FY"]
     .astype(str)
@@ -19,79 +19,75 @@ df["FY_year"] = (
 df_dui = df[df["DC Case Type"].str.contains("DUI", case=False, na=False)]
 
 # Filter to Anne Arundel County
-df_dui_aa = df_dui[df_dui["County"] == "Anne Arundel"].copy()  # .copy() avoids the warning
+df_dui_aa = df_dui[df_dui["County"] == "Anne Arundel"].copy()
 
 # ======================
-# 2. Define SUCCESS outcomes (NOT counted as failures)
+# 2. Define which disposition labels count as FAILURES
 # ======================
 
-# If any of these strings appear in Filing/Disposition Type, we treat that as a "successful" outcome
-success_terms = [
-    "Guilty",
-    "Not Guilty",
-    "Probation Before Judgment",
-]
+# Success outcomes: DO NOT count as failures
+success_terms = ["Guilty", "Not Guilty", "Probation"]
 
-# Create a boolean column: is_success
-df_dui_aa["is_success"] = df_dui_aa["Filing/Disposition Type"].str.contains(
-    "|".join(success_terms),
-    case=False,
-    na=False
-)
+# Failure outcomes: DO count as failures
+# -> adjust this list if you want to include/exclude "Jury Trial", "Withdrawn", etc.
+failure_terms = ["Nolle", "Stet", "Dismiss"]
 
 # ======================
-# 3. Build denominator: total DUI filings per year
+# 3. Denominator: total DUI filings per year
 # ======================
 
-dui_total_by_year = (
+dui_filings_by_year = (
     df_dui_aa[df_dui_aa["Count Description"] == "Filing"]
     .groupby("FY_year")["Count"]
     .sum()
 )
 
 # ======================
-# 4. Build numerator: DUI failures = all dispositions that are NOT success
+# 4. Numerator: DUI failures per year (explicit failure labels)
 # ======================
 
-# Consider only non-filing rows as outcome rows
-dui_outcomes = df_dui_aa[df_dui_aa["Count Description"] != "Filing"]
+# Only look at final disposition rows
+dui_dispositions = df_dui_aa[df_dui_aa["Count Description"] == "Disposition"]
 
-# Failures: outcome rows that are NOT success
-dui_failures = dui_outcomes[~dui_outcomes["is_success"]]
+# Rows where disposition matches any of the failure terms
+failure_mask = dui_dispositions["Filing/Disposition Type"].str.contains(
+    "|".join(failure_terms),
+    case=False,
+    na=False
+)
 
-dui_failure_by_year = (
-    dui_failures
+dui_failures_by_year = (
+    dui_dispositions[failure_mask]
     .groupby("FY_year")["Count"]
     .sum()
 )
 
-# Align indices so division works safely
-dui_failure_by_year = dui_failure_by_year.reindex(dui_total_by_year.index, fill_value=0)
+# Align indices
+dui_failures_by_year = dui_failures_by_year.reindex(dui_filings_by_year.index, fill_value=0)
 
 # ======================
-# 5. Compute failure rate and display table
+# 5. Compute failure rate
 # ======================
 
-dui_failure_rate = (dui_failure_by_year / dui_total_by_year) * 100
+dui_failure_rate = (dui_failures_by_year / dui_filings_by_year) * 100
 dui_failure_rate = dui_failure_rate.fillna(0)
 
 results = pd.DataFrame({
-    "Total DUI Filings": dui_total_by_year,
-    "Total DUI Failures (Non-G/NG/PBJ)": dui_failure_by_year,
-    "Failure Rate (%)": dui_failure_rate
+    "Total DUI Filings": dui_filings_by_year,
+    "Total DUI Failures": dui_failures_by_year,
+    "Failure Rate (%)": dui_failure_rate.round(3),
 })
 
-print("\nAnne Arundel County DUI Failure Results (Non-Guilty / Non-Not-Guilty / Non-PBJ):")
+print("\nAnne Arundel County DUI Failure Results")
 print(results)
 
 # ======================
-# 6. Plot the failure rate over time
+# 6. Plot
 # ======================
 
-plt.figure(figsize=(10,6))
-plt.plot(results.index, results["Failure Rate (%)"], marker='o', color='red')
-
-plt.title("Anne Arundel DUI Failure Rate\n(% of DUI Filings NOT Ending in Guilty / Not Guilty / PBJ)")
+plt.figure(figsize=(10, 6))
+plt.plot(results.index, results["Failure Rate (%)"], marker='o')
+plt.title("Anne Arundel DUI Failure Rate\n(% of Filings Ending in Nolle Pros / Stet / Dismissed)")
 plt.xlabel("Fiscal Year")
 plt.ylabel("Failure Rate (%)")
 plt.grid(True, linestyle='--', alpha=0.5)
