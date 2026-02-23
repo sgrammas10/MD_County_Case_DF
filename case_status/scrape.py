@@ -185,7 +185,11 @@ def _parse_case_detail(case_number: str, html: str) -> List[ChargeRecord]:
     return charge_records
 
 
-def _fetch_case_html_playwright(case_numbers: List[str]) -> List[Tuple[str, str]]:
+def _fetch_case_html_playwright(
+    case_numbers: List[str],
+    debug_html_path: Optional[str],
+    headed: bool,
+) -> List[Tuple[str, str]]:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
     except ImportError as exc:
@@ -196,7 +200,7 @@ def _fetch_case_html_playwright(case_numbers: List[str]) -> List[Tuple[str, str]
 
     results: List[Tuple[str, str]] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
+        browser = p.chromium.launch(headless=not headed)
         context = browser.new_context()
         page = context.new_page()
 
@@ -217,7 +221,20 @@ def _fetch_case_html_playwright(case_numbers: List[str]) -> List[Tuple[str, str]
             except PlaywrightTimeoutError:
                 pass
 
-            case_input = page.locator("input[type='text']").first
+            # If bot protection is shown, let user solve it in headed mode.
+            if headed and (
+                page.locator("iframe[title*='captcha' i]").count() > 0
+                or "captcha-delivery.com" in page.content()
+            ):
+                print("CAPTCHA detected. Please solve it in the opened browser.")
+                input("Press Enter here once the CAPTCHA is solved...")
+                page.wait_for_load_state("domcontentloaded")
+
+            if debug_html_path:
+                with open(debug_html_path, "w", encoding="utf-8") as f:
+                    f.write(page.content())
+
+            case_input = _locate_case_input(page)
             case_input.fill(case_number)
 
             search_button = page.get_by_role("button", name=re.compile(r"search", re.I))
@@ -240,9 +257,47 @@ def _fetch_case_html_playwright(case_numbers: List[str]) -> List[Tuple[str, str]
     return results
 
 
-def scrape_case_numbers(case_numbers: List[str]) -> List[ChargeRecord]:
+def _locate_case_input(page):
+    # Try common selectors on main page
+    selectors = [
+        "input#caseNumber",
+        "input[name='caseId']",
+        "input[aria-label*='Case Number' i]",
+        "input[placeholder*='Case Number' i]",
+        "input[name*='case' i]",
+        "input[id*='case' i]",
+        "input[type='text']",
+    ]
+    for sel in selectors:
+        locator = page.locator(sel).first
+        try:
+            locator.wait_for(state="visible", timeout=8000)
+            return locator
+        except Exception:
+            pass
+
+    # Fallback: search within iframes
+    for frame in page.frames:
+        if frame == page.main_frame:
+            continue
+        for sel in selectors:
+            locator = frame.locator(sel).first
+            try:
+                locator.wait_for(state="visible", timeout=8000)
+                return locator
+            except Exception:
+                pass
+
+    raise RuntimeError("Unable to locate case number input field.")
+
+
+def scrape_case_numbers(
+    case_numbers: List[str],
+    debug_html_path: Optional[str],
+    headed: bool,
+) -> List[ChargeRecord]:
     all_records: List[ChargeRecord] = []
-    for case_number, html in _fetch_case_html_playwright(case_numbers):
+    for case_number, html in _fetch_case_html_playwright(case_numbers, debug_html_path, headed):
         records = _parse_case_detail(case_number, html)
         all_records.extend(records)
     return all_records
@@ -287,10 +342,20 @@ def main() -> None:
         help="CSV file with a case_number header.",
     )
     parser.add_argument("--output", default="case_status/case_results.csv", help="Output CSV path.")
+    parser.add_argument(
+        "--debug-html",
+        default=None,
+        help="Optional path to dump the loaded HTML before searching for the case input.",
+    )
+    parser.add_argument(
+        "--headed",
+        action="store_true",
+        help="Run with a visible browser window (useful for solving CAPTCHAs).",
+    )
     args = parser.parse_args()
 
     case_numbers = _load_case_numbers(args.input)
-    records = scrape_case_numbers(case_numbers)
+    records = scrape_case_numbers(case_numbers, args.debug_html, args.headed)
     _write_csv(args.output, records)
 
 
