@@ -2,6 +2,7 @@ import argparse
 import csv
 import datetime as dt
 import re
+import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -189,6 +190,8 @@ def _fetch_case_html_playwright(
     case_numbers: List[str],
     debug_html_path: Optional[str],
     headed: bool,
+    delay_seconds: float,
+    user_data_dir: str,
 ) -> List[Tuple[str, str]]:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -200,8 +203,10 @@ def _fetch_case_html_playwright(
 
     results: List[Tuple[str, str]] = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=not headed)
-        context = browser.new_context()
+        context = p.chromium.launch_persistent_context(
+            user_data_dir=user_data_dir,
+            headless=not headed,
+        )
         page = context.new_page()
 
         for case_number in case_numbers:
@@ -250,9 +255,10 @@ def _fetch_case_html_playwright(
             page.wait_for_load_state("domcontentloaded")
             html = page.content()
             results.append((case_number, html))
+            if delay_seconds > 0:
+                time.sleep(delay_seconds)
 
         context.close()
-        browser.close()
 
     return results
 
@@ -295,9 +301,13 @@ def scrape_case_numbers(
     case_numbers: List[str],
     debug_html_path: Optional[str],
     headed: bool,
+    delay_seconds: float,
+    user_data_dir: str,
 ) -> List[ChargeRecord]:
     all_records: List[ChargeRecord] = []
-    for case_number, html in _fetch_case_html_playwright(case_numbers, debug_html_path, headed):
+    for case_number, html in _fetch_case_html_playwright(
+        case_numbers, debug_html_path, headed, delay_seconds, user_data_dir
+    ):
         records = _parse_case_detail(case_number, html)
         all_records.extend(records)
     return all_records
@@ -352,10 +362,27 @@ def main() -> None:
         action="store_true",
         help="Run with a visible browser window (useful for solving CAPTCHAs).",
     )
+    parser.add_argument(
+        "--delay-seconds",
+        type=float,
+        default=2.0,
+        help="Delay between case searches to reduce bot detection.",
+    )
+    parser.add_argument(
+        "--user-data-dir",
+        default="case_status/.playwright_user_data",
+        help="Persistent Playwright profile directory for cookies/session.",
+    )
     args = parser.parse_args()
 
     case_numbers = _load_case_numbers(args.input)
-    records = scrape_case_numbers(case_numbers, args.debug_html, args.headed)
+    records = scrape_case_numbers(
+        case_numbers,
+        args.debug_html,
+        args.headed,
+        args.delay_seconds,
+        args.user_data_dir,
+    )
     _write_csv(args.output, records)
 
 
