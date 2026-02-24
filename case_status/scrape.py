@@ -2,6 +2,7 @@ import argparse
 import csv
 import datetime as dt
 import re
+import random
 import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
@@ -192,6 +193,10 @@ def _fetch_case_html_playwright(
     headed: bool,
     delay_seconds: float,
     user_data_dir: str,
+    delay_jitter_seconds: float,
+    slow_mo_ms: int,
+    post_captcha_wait_seconds: float,
+    manual: bool,
 ) -> List[Tuple[str, str]]:
     try:
         from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
@@ -206,11 +211,14 @@ def _fetch_case_html_playwright(
         context = p.chromium.launch_persistent_context(
             user_data_dir=user_data_dir,
             headless=not headed,
+            slow_mo=slow_mo_ms if slow_mo_ms > 0 else None,
         )
         page = context.new_page()
 
         for case_number in case_numbers:
+            _sleep_with_jitter(0.4, delay_jitter_seconds)
             page.goto(BASE_URL, wait_until="domcontentloaded")
+            _sleep_with_jitter(0.4, delay_jitter_seconds)
 
             # Handle disclaimer if present
             try:
@@ -233,30 +241,39 @@ def _fetch_case_html_playwright(
             ):
                 print("CAPTCHA detected. Please solve it in the opened browser.")
                 input("Press Enter here once the CAPTCHA is solved...")
+                if post_captcha_wait_seconds > 0:
+                    time.sleep(post_captcha_wait_seconds)
                 page.wait_for_load_state("domcontentloaded")
 
             if debug_html_path:
                 with open(debug_html_path, "w", encoding="utf-8") as f:
                     f.write(page.content())
 
-            case_input = _locate_case_input(page)
-            case_input.fill(case_number)
-
-            search_button = page.get_by_role("button", name=re.compile(r"search", re.I))
-            if search_button.count() > 0:
-                search_button.first.click()
+            if manual:
+                print(f"Manual mode: please search for case {case_number} in the browser.")
+                input("Press Enter here once the results page has loaded...")
             else:
-                search_input = page.locator("input[value='Search'], input[value*='Search' i]")
-                if search_input.count() > 0:
-                    search_input.first.click()
+                case_input = _locate_case_input(page)
+                _sleep_with_jitter(0.4, delay_jitter_seconds)
+                case_input.fill(case_number)
+                _sleep_with_jitter(0.4, delay_jitter_seconds)
+
+                search_button = page.get_by_role("button", name=re.compile(r"search", re.I))
+                if search_button.count() > 0:
+                    search_button.first.click()
                 else:
-                    case_input.press("Enter")
+                    search_input = page.locator("input[value='Search'], input[value*='Search' i]")
+                    if search_input.count() > 0:
+                        search_input.first.click()
+                    else:
+                        case_input.press("Enter")
 
             page.wait_for_load_state("domcontentloaded")
             html = page.content()
             results.append((case_number, html))
             if delay_seconds > 0:
                 time.sleep(delay_seconds)
+                _sleep_with_jitter(0.0, delay_jitter_seconds)
 
         context.close()
 
@@ -303,10 +320,22 @@ def scrape_case_numbers(
     headed: bool,
     delay_seconds: float,
     user_data_dir: str,
+    delay_jitter_seconds: float,
+    slow_mo_ms: int,
+    post_captcha_wait_seconds: float,
+    manual: bool,
 ) -> List[ChargeRecord]:
     all_records: List[ChargeRecord] = []
     for case_number, html in _fetch_case_html_playwright(
-        case_numbers, debug_html_path, headed, delay_seconds, user_data_dir
+        case_numbers,
+        debug_html_path,
+        headed,
+        delay_seconds,
+        user_data_dir,
+        delay_jitter_seconds,
+        slow_mo_ms,
+        post_captcha_wait_seconds,
+        manual,
     ):
         records = _parse_case_detail(case_number, html)
         all_records.extend(records)
@@ -365,8 +394,31 @@ def main() -> None:
     parser.add_argument(
         "--delay-seconds",
         type=float,
-        default=2.0,
+        default=4.0,
         help="Delay between case searches to reduce bot detection.",
+    )
+    parser.add_argument(
+        "--delay-jitter-seconds",
+        type=float,
+        default=1.5,
+        help="Random extra delay added to actions to look less automated.",
+    )
+    parser.add_argument(
+        "--slow-mo-ms",
+        type=int,
+        default=250,
+        help="Playwright slow motion delay per action in milliseconds.",
+    )
+    parser.add_argument(
+        "--post-captcha-wait-seconds",
+        type=float,
+        default=6.0,
+        help="Extra wait after solving CAPTCHA before continuing.",
+    )
+    parser.add_argument(
+        "--manual",
+        action="store_true",
+        help="Manual assist mode: you perform the search in the browser.",
     )
     parser.add_argument(
         "--user-data-dir",
@@ -382,8 +434,19 @@ def main() -> None:
         args.headed,
         args.delay_seconds,
         args.user_data_dir,
+        args.delay_jitter_seconds,
+        args.slow_mo_ms,
+        args.post_captcha_wait_seconds,
+        args.manual,
     )
     _write_csv(args.output, records)
+
+
+def _sleep_with_jitter(base_seconds: float, jitter_seconds: float) -> None:
+    if base_seconds <= 0 and jitter_seconds <= 0:
+        return
+    jitter = random.uniform(0, max(0.0, jitter_seconds))
+    time.sleep(max(0.0, base_seconds + jitter))
 
 
 if __name__ == "__main__":
